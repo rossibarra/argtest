@@ -1,0 +1,9 @@
+name: mutload
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.8
+  - numpy
+  - matplotlib
+  - tskit
+  - tszip
