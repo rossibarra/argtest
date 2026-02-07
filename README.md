@@ -43,6 +43,12 @@ Compute per-window load (tiled barplots across the contig):
 python mutload_summary.py example_data/maize.tsz --window-size 50000 --out load_windows.html
 ```
 
+Mask individuals only within specific regions (BEDs):
+
+```bash
+python mutload_summary.py example_data/maize.tsz --window-size 1000000 --remove results/beds/Ki11.bed,results/beds/Ki3.bed
+```
+
 ## Inputs
 
 - Tree sequence file: `.ts`, `.trees`, or `.tsz`.
@@ -61,6 +67,9 @@ python mutload_summary.py example_data/maize.tsz --window-size 50000 --out load_
   where the individual's load is greater than (1 + `cutoff`) × the window mean or less
   than (1 - `cutoff`) × the window mean. The cutoff is a fraction of the mean for each window.
   BED files are written to `results/beds/` and the run log to `logs/`.
+- `--remove` accepts one or more BED files listing regions to remove individuals from.
+  If the BED has a 4th column, it is used as the individual ID; otherwise the filename stem is used.
+  Individuals are removed only within the listed regions.
 
 ## Options
 
@@ -70,6 +79,7 @@ positional arguments:
 
 options:
   --window-size         Window size in bp
+  --remove              BED file(s) of regions to remove per individual (comma-separated or repeated)
   --cutoff              Outlier cutoff as a fraction of the window mean (default: 0.25)
   --out                 Output HTML file (default: mutational_load_summary.html; written to results/)
   --suffix-to-strip     Suffix removed from individual IDs (default: _anchorwave)

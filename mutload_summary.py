@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path
 import os
 import sys
+from bisect import bisect_right
 
 import numpy as np
 
@@ -38,41 +39,52 @@ def get_individual_name(ind, suffix_to_strip="_anchorwave") -> str:
     return nm.replace(suffix_to_strip, "")
 
 
-def drop_individuals_by_name(ts: tskit.TreeSequence, targets, suffix_to_strip="_anchorwave"):
-    if not targets:
-        return ts
-
-    targets = set(targets)
-    drop_nodes = set()
-    found = set()
-    for ind_id, ind in enumerate(ts.individuals()):
-        nm = get_individual_name(ind, suffix_to_strip=suffix_to_strip)
-        if nm in targets:
-            found.add(nm)
-            drop_nodes.update(ts.individual(ind_id).nodes)
-
-    missing = sorted(targets - found)
-    if missing:
-        raise ValueError(f"Individuals not found: {', '.join(missing)}")
-
-    keep = [u for u in ts.samples() if u not in drop_nodes]
-    return ts.simplify(samples=keep, keep_unary=True)
-
-
-def mutational_load(ts: tskit.TreeSequence, windows: np.ndarray = None) -> np.ndarray:
+def mutational_load(
+    ts: tskit.TreeSequence,
+    windows: np.ndarray = None,
+    remove_intervals=None,
+    name_to_nodes=None,
+) -> np.ndarray:
     genome_windows = np.array([0, ts.sequence_length]) if windows is None else windows
     assert genome_windows[0] == 0 and genome_windows[-1] == ts.sequence_length
-    mutations_window = np.digitize(ts.sites_position[ts.mutations_site], genome_windows) - 1
-    assert mutations_window.min() >= 0 and mutations_window.max() < genome_windows.size - 1
     load = np.zeros((genome_windows.size - 1, ts.num_samples))
-    tree = ts.first(sample_lists=True)
-    for s in ts.sites():
-        tree.seek(s.position)
-        for m in s.mutations:
-            if m.edge != tskit.NULL:
-                window = mutations_window[m.id]
-                samples = list(tree.samples(m.node))
-                load[window, samples] += 1.0
+    for tree in ts.trees(sample_lists=True):
+        drop_nodes = set()
+        if remove_intervals and name_to_nodes:
+            left, right = tree.interval
+            for nm, intervals in remove_intervals.items():
+                if _interval_overlaps(left, right, intervals):
+                    drop_nodes.update(name_to_nodes.get(nm, []))
+        if drop_nodes:
+            keep = [u for u in ts.samples() if u not in drop_nodes]
+            sub = ts.keep_intervals([tree.interval], simplify=False)
+            sub, node_map = sub.simplify(samples=keep, keep_unary=True, map_nodes=True)
+            rev_map = np.full(sub.num_nodes, tskit.NULL, dtype=int)
+            for u in keep:
+                new_id = node_map[u]
+                if new_id != tskit.NULL:
+                    rev_map[new_id] = u
+            sub_tree = sub.first(sample_lists=True)
+            for s in sub.sites():
+                window = np.digitize([s.position], genome_windows) - 1
+                window = int(window[0])
+                if window < 0 or window >= genome_windows.size - 1:
+                    continue
+                for m in s.mutations:
+                    if m.edge != tskit.NULL:
+                        samples = list(sub_tree.samples(m.node))
+                        orig_samples = [rev_map[u] for u in samples if rev_map[u] != tskit.NULL]
+                        load[window, orig_samples] += 1.0
+        else:
+            for s in tree.sites():
+                window = np.digitize([s.position], genome_windows) - 1
+                window = int(window[0])
+                if window < 0 or window >= genome_windows.size - 1:
+                    continue
+                for m in s.mutations:
+                    if m.edge != tskit.NULL:
+                        samples = list(tree.samples(m.node))
+                        load[window, samples] += 1.0
     return load.squeeze(0) if windows is None else load
 
 
@@ -106,6 +118,64 @@ def aggregate_by_individual(load, names):
     for i, nm in enumerate(names):
         agg[:, idx_map[nm]] += load[:, i]
     return agg, unique
+
+
+def name_to_nodes_map(ts: tskit.TreeSequence, suffix_to_strip="_anchorwave"):
+    mapping = {}
+    for ind_id, ind in enumerate(ts.individuals()):
+        nm = get_individual_name(ind, suffix_to_strip=suffix_to_strip)
+        nodes = list(ts.individual(ind_id).nodes)
+        mapping[nm] = nodes
+    return mapping
+
+
+def _pos_in_intervals(pos, intervals):
+    starts = intervals["starts"]
+    ends = intervals["ends"]
+    idx = bisect_right(starts, pos) - 1
+    return idx >= 0 and pos < ends[idx]
+
+
+def _interval_overlaps(left, right, intervals):
+    starts = intervals["starts"]
+    ends = intervals["ends"]
+    idx = bisect_right(starts, right) - 1
+    if idx < 0:
+        return False
+    return ends[idx] > left
+
+
+def load_remove_intervals(paths):
+    remove = {}
+    for path in paths:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"Remove BED not found: {p}")
+        with open(p, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 3:
+                    raise ValueError(f"Invalid BED line in {p}: {line}")
+                start = float(parts[1])
+                end = float(parts[2])
+                if end <= start:
+                    continue
+                if len(parts) >= 4:
+                    name = parts[3]
+                else:
+                    name = p.stem
+                remove.setdefault(name, []).append((start, end))
+
+    intervals = {}
+    for name, spans in remove.items():
+        spans.sort()
+        starts = [s for s, _ in spans]
+        ends = [e for _, e in spans]
+        intervals[name] = {"starts": starts, "ends": ends}
+    return intervals
 
 
 def fig_to_data_url(fig) -> str:
@@ -161,11 +231,14 @@ def plot_outlier_hist(counts):
     return fig
 
 
-def parse_remove_list(value):
-    if value is None:
+def parse_remove_list(values):
+    if not values:
         return []
-    parts = [v.strip() for v in value.split(",")]
-    return [p for p in parts if p]
+    paths = []
+    for value in values:
+        parts = [v.strip() for v in value.split(",")]
+        paths.extend([p for p in parts if p])
+    return paths
 
 
 def parse_args():
@@ -174,6 +247,11 @@ def parse_args():
     )
     p.add_argument("ts", help="Tree sequence file (.ts, .trees, or .tsz)")
     p.add_argument("--window-size", type=float, help="Window size in bp")
+    p.add_argument(
+        "--remove",
+        action="append",
+        help="BED file(s) of regions to remove per individual (comma-separated or repeated)",
+    )
     p.add_argument(
         "--cutoff",
         type=float,
@@ -235,7 +313,15 @@ def main():
                 if windows[-1] > L:
                     windows[-1] = L
 
-            load = mutational_load(ts, windows=windows)
+            remove_paths = parse_remove_list(args.remove)
+            remove_intervals = load_remove_intervals(remove_paths) if remove_paths else None
+            name_to_nodes = name_to_nodes_map(ts, suffix_to_strip=args.suffix_to_strip)
+            load = mutational_load(
+                ts,
+                windows=windows,
+                remove_intervals=remove_intervals,
+                name_to_nodes=name_to_nodes,
+            )
             names = sample_names(ts, suffix_to_strip=args.suffix_to_strip)
             load, unique_names = aggregate_by_individual(load, names)
 
