@@ -22,25 +22,25 @@ conda activate argtest
 Basic:
 
 ```bash
-python mutload_summary.py path/to/trees.tsz
+python mutload_summary.py example_data/maize.tsz
 ```
 
 Drop individuals by name:
 
 ```bash
-python mutload_summary.py path/to/trees.tsz --remove Ky21,Ky22 --out load.html
+python mutload_summary.py example_data/maize.tsz --out load.html
 ```
 
 Drop individuals from a file (one ID per line):
 
 ```bash
-python mutload_summary.py path/to/trees.tsz --remove-file remove.txt
+python mutload_summary.py example_data/maize.tsz
 ```
 
 Compute per-window load (tiled barplots across the contig):
 
 ```bash
-python mutload_summary.py path/to/trees.tsz --window-size 50000 --out load_windows.html
+python mutload_summary.py example_data/maize.tsz --window-size 50000 --out load_windows.html
 ```
 
 ## Inputs
@@ -51,13 +51,16 @@ python mutload_summary.py path/to/trees.tsz --window-size 50000 --out load_windo
 ## Outputs
 
 - An HTML file with an embedded PNG plot.
-- Default output file is `mutational_load_summary.html`.
+- Default output file is `results/mutational_load_summary.html`.
 
 ## Notes
 
 - If `--window-size` is omitted, the report shows a single barplot of per-individual load.
 - If `--window-size` is provided, the report shows one barplot per window, tiled across the contig.
-- If any requested individuals are not found, the script exits with an error.
+- When `--window-size` is provided, per-individual BED files are emitted for windows
+  where the individual's load is greater than (1 + `cutoff`) × the window mean or less
+  than (1 - `cutoff`) × the window mean. The cutoff is a fraction of the mean for each window.
+  BED files are written to `results/beds/` and the run log to `logs/`.
 
 ## Options
 
@@ -66,9 +69,8 @@ positional arguments:
   ts                    Tree sequence file (.ts, .trees, or .tsz)
 
 options:
-  --remove              Comma-separated individual IDs to drop
-  --remove-file         File with one individual ID per line
   --window-size         Window size in bp
-  --out                 Output HTML file (default: mutational_load_summary.html)
+  --cutoff              Outlier cutoff as a fraction of the window mean (default: 0.25)
+  --out                 Output HTML file (default: mutational_load_summary.html; written to results/)
   --suffix-to-strip     Suffix removed from individual IDs (default: _anchorwave)
 ```
