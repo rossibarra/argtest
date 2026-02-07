@@ -133,11 +133,15 @@ def plot_windows(load, names, windows):
     nwin = load.shape[0]
     ncols = 4
     nrows = int(np.ceil(nwin / ncols))
+    # Use a shared y-axis scale across all window plots
+    ymax = float(load.max()) if load.size else 0.0
+    ytop = ymax * 1.05 if ymax > 0 else 1.0
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3), squeeze=False)
     for i in range(nwin):
         r, c = divmod(i, ncols)
         ax = axes[r][c]
         ax.bar(names, load[i], color="#777777")
+        ax.set_ylim(0, ytop)
         left = int(windows[i])
         right = int(windows[i + 1])
         ax.set_title(f"{left:,}-{right:,} bp")

@@ -1,4 +1,4 @@
-name: mutload
+name: argtest
 channels:
   - conda-forge
 dependencies:

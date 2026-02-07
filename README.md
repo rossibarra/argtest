@@ -14,7 +14,7 @@ Install via conda:
 
 ```bash
 conda env create -f environment.yml
-conda activate mutload
+conda activate argtest
 ```
 
 ## Usage
