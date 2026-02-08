@@ -167,6 +167,81 @@ def build_removal_segments(remove_intervals, sequence_length):
     return segments
 
 
+def build_segments_with_drop_nodes(remove_intervals, name_to_nodes, sequence_length):
+    segments = build_removal_segments(remove_intervals, sequence_length)
+    out = []
+    for left, right, drop_names in segments:
+        drop_nodes = set()
+        for nm in drop_names:
+            drop_nodes.update(name_to_nodes.get(nm, []))
+        out.append((left, right, drop_nodes))
+    return out
+
+
+def trim_ts_by_intervals(ts: tskit.TreeSequence, remove_intervals, name_to_nodes):
+    segments = build_segments_with_drop_nodes(remove_intervals, name_to_nodes, ts.sequence_length)
+    seg_lefts = [s[0] for s in segments]
+    seg_rights = [s[1] for s in segments]
+
+    tables = ts.dump_tables()
+    tables.edges.clear()
+    tables.sites.clear()
+    tables.mutations.clear()
+
+    # Edges: split by segments, remove if parent/child dropped in that segment
+    for edge in ts.edges():
+        i = bisect_right(seg_rights, edge.left)
+        while i < len(segments) and seg_lefts[i] < edge.right:
+            left, right, drop_nodes = segments[i]
+            seg_l = max(edge.left, left)
+            seg_r = min(edge.right, right)
+            if seg_r > seg_l:
+                if edge.parent not in drop_nodes and edge.child not in drop_nodes:
+                    tables.edges.add_row(
+                        left=seg_l,
+                        right=seg_r,
+                        parent=edge.parent,
+                        child=edge.child,
+                        metadata=edge.metadata,
+                    )
+            i += 1
+
+    # Sites and mutations: drop mutations whose node is removed in the segment
+    for site in ts.sites():
+        i = bisect_right(seg_rights, site.position)
+        if i >= len(segments) or seg_lefts[i] > site.position:
+            i = bisect_right(seg_lefts, site.position) - 1
+        if i < 0 or i >= len(segments):
+            continue
+        _, _, drop_nodes = segments[i]
+        kept = []
+        for mut in site.mutations:
+            if mut.node in drop_nodes:
+                continue
+            kept.append(mut)
+        if not kept:
+            continue
+        new_site_id = tables.sites.add_row(
+            position=site.position,
+            ancestral_state=site.ancestral_state,
+            metadata=site.metadata,
+        )
+        for mut in kept:
+            tables.mutations.add_row(
+                site=new_site_id,
+                node=mut.node,
+                derived_state=mut.derived_state,
+                parent=tskit.NULL,
+                time=mut.time,
+                metadata=mut.metadata,
+            )
+
+    tables.sort()
+    tables.build_index()
+    tables.compute_mutation_parents()
+    return tables.tree_sequence()
+
+
 def load_remove_intervals(paths):
     remove = {}
     for path in paths:
@@ -311,10 +386,8 @@ def main():
     repo_root = Path(__file__).resolve().parent
     results_dir = repo_root / "results"
     logs_dir = repo_root / "logs"
-    beds_dir = results_dir / "beds"
     results_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
-    beds_dir.mkdir(parents=True, exist_ok=True)
 
     out = results_dir / Path(args.out).name
 
@@ -344,6 +417,13 @@ def main():
             remove_paths = parse_remove_list(args.remove)
             remove_intervals = load_remove_intervals(remove_paths) if remove_paths else None
             name_to_nodes = name_to_nodes_map(ts, suffix_to_strip=args.suffix_to_strip)
+            if remove_intervals:
+                ts = trim_ts_by_intervals(ts, remove_intervals, name_to_nodes)
+                if tszip is None:
+                    raise RuntimeError("tszip is required to write trimmed .tsz files")
+                trimmed_path = results_dir / f"{ts_path.stem}_trimmed.tsz"
+                tszip.compress(ts, trimmed_path)
+                remove_intervals = None
             load = mutational_load(
                 ts,
                 windows=windows,
@@ -400,7 +480,7 @@ img {{ max-width: 100%; height: auto; }}
 
             if windows is not None:
                 # Write one BED listing outliers per window
-                out_path = beds_dir / f"{ts_path.stem}_outliers.bed"
+                out_path = results_dir / f"{ts_path.stem}_outliers.bed"
                 lines = []
                 for w in range(load.shape[0]):
                     if not valid[w]:

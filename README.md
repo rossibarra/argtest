@@ -1,6 +1,6 @@
 # Mutational Load Summary Script
 
-`mutload_summary.py` generates an HTML report of derived mutational load per individual from a tree sequence.
+`mutload.py` generates an HTML report of derived mutational load per individual from a tree sequence.
 
 ## Requirements
 
@@ -22,20 +22,20 @@ conda activate argtest
 Basic:
 
 ```bash
-python mutload_summary.py example_data/maize.tsz
+python mutload.py example_data/maize.tsz
 ```
 
 
 Compute per-window load (tiled barplots across the contig):
 
 ```bash
-python mutload_summary.py example_data/maize.tsz --window-size 50000 --out load_windows.html
+python mutload.py example_data/maize.tsz --window-size 50000 --out load_windows.html
 ```
 
 Remove individuals from the treesequence only within specific regions (BEDs):
 
 ```bash
-python mutload_summary.py example_data/maize.tsz --window-size 1000000 --cutoff 0.5 --remove results/beds/maize_outliers.bed
+python mutload.py example_data/maize.tsz --window-size 1000000 --cutoff 0.5 --remove results/maize_outliers.bed
 ```
 
 ## Inputs
@@ -56,10 +56,11 @@ python mutload_summary.py example_data/maize.tsz --window-size 1000000 --cutoff 
   where an individual's load is greater than (1 + `cutoff`) × the window mean or less than
   (1 - `cutoff`) × the window mean. The cutoff is a fraction of the mean for each window.
   The BED includes columns: `chrom`, `start`, `end`, `outlier_ids`, `outlier_values`, `window_mean`.
-  Output is written to `results/beds/` and the run log to `logs/`.
+  Output is written to `results/` and the run log to `logs/`.
 - `--remove` accepts one or more BED files listing regions where individuals are removed from the tree sequence.
   If the BED has a 4th column, it is used as the individual ID (comma-separated IDs supported); otherwise the filename stem is used.
   Individuals are removed only within the listed regions.
+  When `--remove` is used, a trimmed tree sequence is written to `results/<input>_trimmed.tsz`.
 
 ## Options
 
