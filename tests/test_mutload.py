@@ -7,7 +7,9 @@ import tskit
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import mutload as ml
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import mutload_common as mc
+import mutload_summary as ms
 
 
 def make_simple_ts():
@@ -66,9 +68,9 @@ def make_ts_many_individuals(n=100, length=10):
 def test_windowing_sanity():
     ts = make_simple_ts()
     windows = np.array([0, 5, 10], dtype=float)
-    load = ml.mutational_load(ts, windows=windows)
-    names = ml.sample_names(ts)
-    load, _ = ml.aggregate_by_individual(load, names)
+    load = mc.mutational_load(ts, windows=windows)
+    names = mc.sample_names(ts)
+    load, _ = mc.aggregate_by_individual(load, names)
     assert load.shape == (2, 2)
     # First window has site at 1 on A, second window has site at 7 on B
     assert load[0, 0] == 1
@@ -91,7 +93,7 @@ def test_outlier_mask_logic():
 def test_remove_bed_parsing(tmp_path):
     bed = tmp_path / "x.bed"
     bed.write_text("chr1\t1\t3\tA,B\nchr1\t5\t6\tC\n")
-    remove = ml.load_remove_intervals([bed])
+    remove = mc.load_remove_intervals([bed])
     assert set(remove.keys()) == {"A", "B", "C"}
     assert remove["A"]["starts"] == [1.0]
     assert remove["B"]["starts"] == [1.0]
@@ -103,7 +105,7 @@ def test_segment_merge_logic():
         "A": {"starts": [1.0, 4.0], "ends": [3.0, 6.0]},
         "B": {"starts": [2.0], "ends": [5.0]},
     }
-    segs = ml.build_removal_segments(intervals, 10.0)
+    segs = mc.build_removal_segments(intervals, 10.0)
     # Expect segments covering [0,1), [1,2), [2,3), [3,4), [4,5), [5,6), [6,10)
     assert segs[0][0] == 0.0 and segs[0][1] == 1.0
     assert segs[-1][0] == 6.0 and segs[-1][1] == 10.0
@@ -112,8 +114,8 @@ def test_segment_merge_logic():
 def test_trim_preserves_coordinates(tmp_path):
     ts = make_simple_ts()
     intervals = {"A": {"starts": [0.0], "ends": [5.0]}}
-    name_to_nodes = ml.name_to_nodes_map(ts)
-    trimmed = ml.trim_ts_by_intervals(ts, intervals, name_to_nodes)
+    name_to_nodes = mc.name_to_nodes_map(ts)
+    trimmed = mc.trim_ts_by_intervals(ts, intervals, name_to_nodes)
     assert trimmed.sequence_length == ts.sequence_length
     assert trimmed.sites_position.min() >= 0.0
     assert trimmed.sites_position.max() <= ts.sequence_length
@@ -122,8 +124,8 @@ def test_trim_preserves_coordinates(tmp_path):
 def test_trim_removes_nodes_in_interval():
     ts = make_simple_ts()
     intervals = {"A": {"starts": [0.0], "ends": [5.0]}}
-    name_to_nodes = ml.name_to_nodes_map(ts)
-    trimmed = ml.trim_ts_by_intervals(ts, intervals, name_to_nodes)
+    name_to_nodes = mc.name_to_nodes_map(ts)
+    trimmed = mc.trim_ts_by_intervals(ts, intervals, name_to_nodes)
     # Mutation at position 1 on A should be removed; position 7 on B remains
     assert trimmed.num_sites == 1
     assert trimmed.sites_position.tolist() == [7.0]
@@ -132,8 +134,8 @@ def test_trim_removes_nodes_in_interval():
 def test_trim_mutation_parent_integrity():
     ts = make_simple_ts()
     intervals = {"A": {"starts": [0.0], "ends": [5.0]}}
-    name_to_nodes = ml.name_to_nodes_map(ts)
-    trimmed = ml.trim_ts_by_intervals(ts, intervals, name_to_nodes)
+    name_to_nodes = mc.name_to_nodes_map(ts)
+    trimmed = mc.trim_ts_by_intervals(ts, intervals, name_to_nodes)
     # Should load without parent errors
     assert trimmed.num_sites >= 0
 
@@ -153,16 +155,15 @@ def test_outputs_written(tmp_path, monkeypatch):
 
     # Run main via function
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mpl"))
-    monkeypatch.setattr(ml, "load_ts", lambda _: ts)
-    monkeypatch.setattr(ml, "parse_args", lambda: type("A", (), {
+    monkeypatch.setattr(ms, "load_ts", lambda _: ts)
+    monkeypatch.setattr(ms, "parse_args", lambda: type("A", (), {
         "ts": str(ts_path),
         "window_size": 5.0,
-        "remove": None,
         "cutoff": 0.5,
         "out": "out.html",
         "suffix_to_strip": "_anchorwave",
     })())
-    ml.main()
+    ms.main()
 
     assert (cwd / "results" / "out.html").exists()
     assert (cwd / "results" / "test_outliers.bed").exists()
@@ -175,16 +176,15 @@ def test_no_remove_no_trimmed(tmp_path, monkeypatch):
     ts.dump(ts_path)
     cwd = Path(__file__).resolve().parents[1]
     os.chdir(cwd)
-    monkeypatch.setattr(ml, "load_ts", lambda _: ts)
-    monkeypatch.setattr(ml, "parse_args", lambda: type("A", (), {
+    monkeypatch.setattr(ms, "load_ts", lambda _: ts)
+    monkeypatch.setattr(ms, "parse_args", lambda: type("A", (), {
         "ts": str(ts_path),
         "window_size": 5.0,
-        "remove": None,
         "cutoff": 0.5,
         "out": "out.html",
         "suffix_to_strip": "_anchorwave",
     })())
-    ml.main()
+    ms.main()
     assert not (cwd / "results" / "test_trimmed.tsz").exists()
 
 
@@ -194,16 +194,15 @@ def test_no_mutations_outliers_empty(tmp_path, monkeypatch):
     ts.dump(ts_path)
     cwd = Path(__file__).resolve().parents[1]
     os.chdir(cwd)
-    monkeypatch.setattr(ml, "load_ts", lambda _: ts)
-    monkeypatch.setattr(ml, "parse_args", lambda: type("A", (), {
+    monkeypatch.setattr(ms, "load_ts", lambda _: ts)
+    monkeypatch.setattr(ms, "parse_args", lambda: type("A", (), {
         "ts": str(ts_path),
         "window_size": 5.0,
-        "remove": None,
         "cutoff": 0.5,
         "out": "nomut.html",
         "suffix_to_strip": "_anchorwave",
     })())
-    ml.main()
+    ms.main()
     bed = cwd / "results" / "nomut_outliers.bed"
     assert bed.exists()
     assert bed.read_text().strip() == ""
@@ -212,40 +211,40 @@ def test_no_mutations_outliers_empty(tmp_path, monkeypatch):
 def test_single_sample_ts():
     ts = make_ts_no_mutations(n_samples=1, length=10)
     windows = np.array([0, 10], dtype=float)
-    load = ml.mutational_load(ts, windows=windows)
-    names = ml.sample_names(ts)
-    load, _ = ml.aggregate_by_individual(load, names)
+    load = mc.mutational_load(ts, windows=windows)
+    names = mc.sample_names(ts)
+    load, _ = mc.aggregate_by_individual(load, names)
     assert load.shape == (1, 1)
 
 
 def test_intervals_outside_sequence_length():
     ts = make_simple_ts()
     intervals = {"A": {"starts": [100.0], "ends": [200.0]}}
-    name_to_nodes = ml.name_to_nodes_map(ts)
-    trimmed = ml.trim_ts_by_intervals(ts, intervals, name_to_nodes)
+    name_to_nodes = mc.name_to_nodes_map(ts)
+    trimmed = mc.trim_ts_by_intervals(ts, intervals, name_to_nodes)
     assert trimmed.num_sites == ts.num_sites
 
 
 def test_overlapping_bed_with_commas(tmp_path):
     bed = tmp_path / "x.bed"
     bed.write_text("chr1\t1\t4\tA,B\nchr1\t3\t5\tB,C\n")
-    remove = ml.load_remove_intervals([bed])
+    remove = mc.load_remove_intervals([bed])
     assert set(remove.keys()) == {"A", "B", "C"}
 
 
 def test_all_samples_removed_in_segment():
     ts = make_simple_ts()
     intervals = {"A": {"starts": [0.0], "ends": [10.0]}, "B": {"starts": [0.0], "ends": [10.0]}}
-    name_to_nodes = ml.name_to_nodes_map(ts)
-    trimmed = ml.trim_ts_by_intervals(ts, intervals, name_to_nodes)
+    name_to_nodes = mc.name_to_nodes_map(ts)
+    trimmed = mc.trim_ts_by_intervals(ts, intervals, name_to_nodes)
     assert trimmed.sequence_length == ts.sequence_length
 
 
 def test_idempotent_no_effect_remove():
     ts = make_simple_ts()
     intervals = {"C": {"starts": [0.0], "ends": [5.0]}}  # C not in TS
-    name_to_nodes = ml.name_to_nodes_map(ts)
-    trimmed = ml.trim_ts_by_intervals(ts, intervals, name_to_nodes)
+    name_to_nodes = mc.name_to_nodes_map(ts)
+    trimmed = mc.trim_ts_by_intervals(ts, intervals, name_to_nodes)
     assert trimmed.num_sites == ts.num_sites
     assert trimmed.num_edges >= ts.num_edges
 
@@ -253,16 +252,16 @@ def test_idempotent_no_effect_remove():
 def test_sample_order_preserved():
     ts = make_simple_ts()
     intervals = {"A": {"starts": [0.0], "ends": [5.0]}}
-    name_to_nodes = ml.name_to_nodes_map(ts)
-    trimmed = ml.trim_ts_by_intervals(ts, intervals, name_to_nodes)
+    name_to_nodes = mc.name_to_nodes_map(ts)
+    trimmed = mc.trim_ts_by_intervals(ts, intervals, name_to_nodes)
     assert trimmed.samples().tolist() == ts.samples().tolist()
 
 
 def test_trim_validate():
     ts = make_simple_ts()
     intervals = {"A": {"starts": [0.0], "ends": [5.0]}}
-    name_to_nodes = ml.name_to_nodes_map(ts)
-    trimmed = ml.trim_ts_by_intervals(ts, intervals, name_to_nodes)
+    name_to_nodes = mc.name_to_nodes_map(ts)
+    trimmed = mc.trim_ts_by_intervals(ts, intervals, name_to_nodes)
     if hasattr(trimmed, "validate"):
         trimmed.validate()
 
@@ -272,7 +271,7 @@ def test_large_interval_counts():
     for i in range(1000):
         intervals["A"]["starts"].append(float(i))
         intervals["A"]["ends"].append(float(i + 0.5))
-    segs = ml.build_removal_segments(intervals, 2000.0)
+    segs = mc.build_removal_segments(intervals, 2000.0)
     assert segs[0][0] == 0.0
     assert segs[-1][1] == 2000.0
 
@@ -280,9 +279,9 @@ def test_large_interval_counts():
 def test_many_individuals_shapes():
     ts = make_ts_many_individuals(n=100, length=10)
     windows = np.array([0, 10], dtype=float)
-    load = ml.mutational_load(ts, windows=windows)
-    names = ml.sample_names(ts)
-    load, unique = ml.aggregate_by_individual(load, names)
+    load = mc.mutational_load(ts, windows=windows)
+    names = mc.sample_names(ts)
+    load, unique = mc.aggregate_by_individual(load, names)
     assert load.shape == (1, 100)
     assert len(unique) == 100
 
@@ -293,7 +292,7 @@ def test_relative_bed_paths(tmp_path, monkeypatch):
     cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
-        remove = ml.load_remove_intervals([Path("rel.bed")])
+        remove = mc.load_remove_intervals([Path("rel.bed")])
         assert "A" in remove
     finally:
         os.chdir(cwd)
@@ -305,19 +304,18 @@ def test_output_overwrite(tmp_path, monkeypatch):
     ts.dump(ts_path)
     cwd = Path(__file__).resolve().parents[1]
     os.chdir(cwd)
-    monkeypatch.setattr(ml, "load_ts", lambda _: ts)
-    monkeypatch.setattr(ml, "parse_args", lambda: type("A", (), {
+    monkeypatch.setattr(ms, "load_ts", lambda _: ts)
+    monkeypatch.setattr(ms, "parse_args", lambda: type("A", (), {
         "ts": str(ts_path),
         "window_size": 5.0,
-        "remove": None,
         "cutoff": 0.5,
         "out": "overwrite.html",
         "suffix_to_strip": "_anchorwave",
     })())
-    ml.main()
+    ms.main()
     out = cwd / "results" / "overwrite.html"
     assert out.exists()
     first = out.read_text()
-    ml.main()
+    ms.main()
     second = out.read_text()
     assert first == second
