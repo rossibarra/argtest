@@ -1,7 +1,8 @@
 # Mutational Load Summary Script
 
 `scripts/mutload_summary.py` generates an HTML report of derived mutational load per individual from a tree sequence and writes a BED of outlier windows when a window size is provided.
-`scripts/trim_ts.py` removes individuals over BED intervals and writes a trimmed tree sequence.
+`scripts/trim_samples.py` removes individuals over BED intervals or by name and writes a trimmed tree sequence.
+`scripts/trim_regions.py` removes genome intervals (all samples) from a tree sequence based on a BED file.
 
 ## Requirements
 
@@ -37,7 +38,19 @@ Remove individuals from the treesequence only within specific regions (BEDs):
 
 ```bash
 python scripts/mutload_summary.py example_data/maize.tsz --window-size 1000000 --cutoff 0.5
-python scripts/trim_ts.py example_data/maize.tsz --remove results/maize_outliers.bed
+python scripts/trim_samples.py example_data/maize.tsz --remove results/maize_outliers.bed
+```
+
+Remove specific individuals everywhere:
+
+```bash
+python scripts/trim_samples.py example_data/maize.tsz --individuals B73,Mo17
+```
+
+Remove regions for all samples:
+
+```bash
+python scripts/trim_regions.py example_data/maize.tsz --remove example_data/bad_regions.bed --simplify
 ```
 
 ## Inputs
@@ -59,7 +72,7 @@ python scripts/trim_ts.py example_data/maize.tsz --remove results/maize_outliers
   (1 - `cutoff`) × the window mean. The cutoff is a fraction of the mean for each window.
   The BED includes columns: `chrom`, `start`, `end`, `outlier_ids`, `outlier_values`, `window_mean`.
   Output is written to `results/` and the run log to `logs/`.
-- `trim_ts.py` accepts one or more BED files listing regions where individuals are removed from the tree sequence.
+- `trim_samples.py` accepts one or more BED files listing regions where individuals are removed from the tree sequence.
   If the BED has a 4th column, it is used as the individual ID (comma-separated IDs supported); otherwise the filename stem is used.
   Individuals are removed only within the listed regions.
 
@@ -78,14 +91,27 @@ options:
   --suffix-to-strip     Suffix removed from individual IDs (default: _anchorwave)
 ```
 
-`trim_ts.py`:
+`trim_samples.py`:
 
 ```text
 positional arguments:
   ts                    Tree sequence file (.ts, .trees, or .tsz)
 
 options:
+  --individuals         Comma-separated individual IDs to remove across the entire sequence
   --remove              BED file(s) of regions to remove per individual (comma-separated or repeated)
   --out                 Output tree sequence path (.ts, .trees, or .tsz)
   --suffix-to-strip     Suffix removed from individual IDs (default: _anchorwave)
+```
+
+`trim_regions.py`:
+
+```text
+positional arguments:
+  ts                    Tree sequence file (.ts, .trees, or .tsz)
+
+options:
+  --remove              BED file(s) of regions to remove (comma-separated or repeated)
+  --simplify            Simplify output while preserving original coordinates
+  --out                 Output tree sequence path (.ts, .trees, or .tsz)
 ```
