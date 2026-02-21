@@ -2,161 +2,200 @@
 from __future__ import annotations
 
 import argparse
+import pickle
+import re
 from pathlib import Path
 
-import tskit
+import numpy as np
 
-try:
-    import tszip
-except Exception:  # pragma: no cover - optional dependency
-    tszip = None
+from argtest_common import build_shared_mask, collapse_masked_intervals, dump_ts, load_ts
 
 
-def load_ts(path: Path) -> tskit.TreeSequence:
-    if path.suffix == ".tsz":
-        if tszip is None:
-            raise RuntimeError("tszip is required to load .tsz files")
-        return tszip.load(str(path))
-    return tskit.load(str(path))
+def infer_mu_base(ts_stem: str) -> list[str]:
+    bases = [ts_stem]
+    m = re.match(r"^(.+)\.(\d+)$", ts_stem)
+    if m:
+        bases.append(m.group(1))
+    m = re.match(r"^(.+)[_-](\d+)$", ts_stem)
+    if m:
+        bases.append(m.group(1))
+    dedup = []
+    seen = set()
+    for b in bases:
+        if b not in seen:
+            dedup.append(b)
+            seen.add(b)
+    return dedup
 
 
-def dump_ts(ts: tskit.TreeSequence, out_path: Path) -> None:
-    if out_path.suffix == ".tsz":
-        if tszip is None:
-            raise RuntimeError("tszip is required to write .tsz files")
-        tszip.compress(ts, out_path)
-        return
-    ts.dump(str(out_path))
+def infer_mu_path(ts_path: Path) -> Path:
+    bases = infer_mu_base(ts_path.stem)
+    search_dirs = [ts_path.parent, ts_path.parent.parent]
+    for d in search_dirs:
+        for b in bases:
+            p = d / f"{b}.mut_rate.p"
+            if p.exists():
+                return p
+    candidates = []
+    for d in search_dirs:
+        if not d.exists():
+            continue
+        for p in d.glob("*.mut_rate.p"):
+            nm = p.name
+            if any(nm.startswith(f"{b}.") or nm == f"{b}.mut_rate.p" for b in bases):
+                candidates.append(p)
+    candidates = sorted(set(candidates))
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise RuntimeError(
+            f"Ambiguous mutation maps for {ts_path.name}: "
+            + ", ".join(str(x) for x in candidates)
+        )
+    raise FileNotFoundError(
+        f"Could not infer mutation map for {ts_path}. Tried bases={bases} in {search_dirs}"
+    )
 
 
-def parse_regions_bed(paths):
-    # Parse BED intervals (chrom column is ignored).
-    intervals = []
-    for path in paths:
-        p = Path(path)
-        if not p.exists():
-            raise FileNotFoundError(f"Remove BED not found: {p}")
-        with open(p, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split()
-                if len(parts) < 3:
-                    raise ValueError(f"Invalid BED line in {p}: {line}")
-                start = float(parts[1])
-                end = float(parts[2])
-                if end <= start:
-                    continue
-                intervals.append((start, end))
-    intervals.sort()
-    return intervals
+def format_num(x: float) -> str:
+    if float(x).is_integer():
+        return str(int(x))
+    return str(x).replace(".", "p")
 
 
-def merge_intervals(intervals):
-    # Merge overlapping or touching intervals.
-    if not intervals:
-        return []
-    merged = [list(intervals[0])]
-    for start, end in intervals[1:]:
-        last = merged[-1]
-        if start <= last[1]:
-            last[1] = max(last[1], end)
-        else:
-            merged.append([start, end])
-    return [(s, e) for s, e in merged]
-
-
-def clamp_intervals(intervals, sequence_length):
-    # Clip intervals to the sequence bounds.
-    clamped = []
-    for start, end in intervals:
-        s = max(0.0, float(start))
-        e = min(float(sequence_length), float(end))
-        if e > s:
-            clamped.append((s, e))
-    return clamped
-
-
-def complement_intervals(remove, sequence_length):
-    # Convert remove-intervals into keep-intervals.
-    keep = []
-    cursor = 0.0
-    for start, end in remove:
-        if start > cursor:
-            keep.append((cursor, start))
-        cursor = max(cursor, end)
-    if cursor < sequence_length:
-        keep.append((cursor, sequence_length))
-    return keep
+def output_name(ts_path: Path, window_size: float, cutoff_bp: float) -> str:
+    ext = ts_path.suffix
+    return (
+        f"{ts_path.stem}.collapsed.ws{format_num(window_size)}."
+        f"accbp{format_num(cutoff_bp)}{ext}"
+    )
 
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Remove regions from a tree sequence based on BED intervals",
+        description=(
+            "Trim regions by collapsing masked and low-accessibility windows in a directory of tree sequences."
+        )
     )
-    p.add_argument("ts", help="Tree sequence file (.ts, .trees, or .tsz)")
     p.add_argument(
-        "--remove",
-        action="append",
+        "--ts-dir",
         required=True,
-        help="BED file(s) of regions to remove (comma-separated or repeated)",
+        type=Path,
+        help="Directory containing tree sequence files (.tsz, .ts, .trees).",
     )
     p.add_argument(
-        "--simplify",
-        action="store_true",
-        help="Simplify the output tree sequence after trimming",
+        "--window-size",
+        required=True,
+        type=float,
+        help="Window size in bp for accessibility checks.",
     )
-    p.add_argument("--out", help="Output tree sequence path (.ts, .trees, or .tsz)")
+    p.add_argument(
+        "--cutoff-bp",
+        required=True,
+        type=float,
+        help="Minimum accessible bp in a window to keep it.",
+    )
+    p.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Output directory for collapsed tree files (default: <ts-dir>/collapsed).",
+    )
+    p.add_argument(
+        "--pattern",
+        default="*",
+        help="Optional glob pattern to filter tree sequence filenames (default: '*').",
+    )
+    p.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help="Optional log file path (default: <out-dir>/collapse_log.txt).",
+    )
     return p.parse_args()
 
 
-def parse_remove_list(values):
-    if not values:
-        return []
-    paths = []
-    for value in values:
-        parts = [v.strip() for v in value.split(",")]
-        paths.extend([p for p in parts if p])
-    return paths
+def find_tree_files(ts_dir: Path, pattern: str) -> list[Path]:
+    if not ts_dir.exists():
+        raise FileNotFoundError(f"Tree directory does not exist: {ts_dir}")
+    files = sorted(
+        [
+            p
+            for p in ts_dir.glob(pattern)
+            if p.is_file() and p.suffix in {".tsz", ".ts", ".trees"}
+        ]
+    )
+    if not files:
+        raise RuntimeError(f"No tree files found in {ts_dir} matching pattern '{pattern}'.")
+    return files
 
 
 def main():
     args = parse_args()
-    ts_path = Path(args.ts)
-    ts = load_ts(ts_path)
+    ts_files = find_tree_files(args.ts_dir, args.pattern)
+    out_dir = args.out_dir or (args.ts_dir / "collapsed")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = args.log or (out_dir / "collapse_log.txt")
 
-    remove_paths = parse_remove_list(args.remove)
-    remove_intervals = merge_intervals(parse_regions_bed(remove_paths))
-    remove_intervals = clamp_intervals(remove_intervals, ts.sequence_length)
-    keep = complement_intervals(remove_intervals, ts.sequence_length)
-    if not keep:
-        # Removing everything: return an empty TS with original length.
-        tables = ts.dump_tables()
-        tables.edges.clear()
-        tables.sites.clear()
-        tables.mutations.clear()
-        tables.sequence_length = ts.sequence_length
-        trimmed = tables.tree_sequence()
-    else:
-        # Keep only the complement intervals without renumbering nodes.
-        trimmed = ts.keep_intervals(keep, simplify=False)
+    first_ts = load_ts(ts_files[0])
+    mu_path = infer_mu_path(ts_files[0])
+    with open(mu_path, "rb") as f:
+        mu = pickle.load(f)
+    mask, good_intervals, windows, acc_bp = build_shared_mask(
+        ts=first_ts,
+        mu=mu,
+        window_size=args.window_size,
+        cutoff_bp=args.cutoff_bp,
+    )
+    kept_bp_windows = float(sum(r - l for l, r in good_intervals))
+    kept_bp_mask = float(mask.get_cumulative_mass(first_ts.sequence_length))
 
-    if args.simplify:
-        # Simplify structure, then restore original coordinate system.
-        trimmed = trimmed.simplify(keep_unary=True)
-        tables = trimmed.dump_tables()
-        # Preserve original coordinate system after simplify.
-        tables.sequence_length = ts.sequence_length
-        trimmed = tables.tree_sequence()
+    with open(log_path, "w") as log:
+        log.write("# trim_regions\n")
+        log.write(f"# ts_dir={args.ts_dir}\n")
+        log.write(f"# out_dir={out_dir}\n")
+        log.write(f"# window_size={args.window_size}\n")
+        log.write(f"# cutoff_bp={args.cutoff_bp}\n\n")
+        log.write("# shared_window_filter\n")
+        log.write(f"reference_ts={ts_files[0]}\n")
+        log.write(f"mu_file={mu_path}\n")
+        log.write(f"sequence_length={first_ts.sequence_length}\n")
+        log.write(f"n_windows={len(windows) - 1}\n")
+        log.write(f"n_good_windows={int(np.sum(acc_bp >= args.cutoff_bp))}\n")
+        log.write(f"kept_bp_from_windows={kept_bp_windows}\n")
+        log.write(f"kept_bp_from_mask={kept_bp_mask}\n\n")
 
-    if args.out:
-        out_path = Path(args.out)
-    else:
-        out_dir = Path(__file__).resolve().parent.parent / "results"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{ts_path.stem}_regions_trimmed.tsz"
-    dump_ts(trimmed, out_path)
+        for ts_file in ts_files:
+            ts = load_ts(ts_file)
+            if float(ts.sequence_length) != float(first_ts.sequence_length):
+                raise RuntimeError(
+                    f"Sequence length mismatch for {ts_file}: "
+                    f"{ts.sequence_length} != {first_ts.sequence_length}"
+                )
+            inferred_mu = infer_mu_path(ts_file)
+            if inferred_mu != mu_path:
+                raise RuntimeError(
+                    f"Inferred mutation map differs for {ts_file}: {inferred_mu} != {mu_path}. "
+                    "This script currently uses one shared window filter for all files."
+                )
+            ts2 = collapse_masked_intervals(ts, mask)
+
+            out_path = out_dir / output_name(ts_file, args.window_size, args.cutoff_bp)
+            dump_ts(ts2, out_path)
+
+            dropped_bp = float(ts.sequence_length - ts2.sequence_length)
+
+            log.write("=" * 80 + "\n")
+            log.write(f"ts_file={ts_file}\n")
+            log.write(f"out_file={out_path}\n")
+            log.write(f"old_L={ts.sequence_length}\n")
+            log.write(f"new_L={ts2.sequence_length}\n")
+            log.write(f"dropped_bp={dropped_bp}\n")
+            log.write("\n")
+
+            print(f"Wrote: {out_path.name}")
+
+    print(f"Done. Log: {log_path}")
 
 
 if __name__ == "__main__":

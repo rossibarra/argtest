@@ -2,8 +2,7 @@
 
 `scripts/mutload_summary.py` generates an HTML report of derived mutational load per individual from a tree sequence and writes a BED of outlier windows when a window size is provided.
 `scripts/trim_samples.py` removes individuals over BED intervals or by name and writes a trimmed tree sequence.
-`scripts/trim_regions.py` removes genome intervals (all samples) from a tree sequence based on a BED file.
-`scripts/collapse_low_access_windows.py` collapses low-accessibility windows (from mutation-map accessibility) across a directory of tree sequences and writes renamed output tree files.
+`scripts/trim_regions.py` collapses low-accessibility windows (from mutation-map accessibility) across a directory of tree sequences and writes renamed output tree files.
 `scripts/compare_trees_html.py` renders two specific trees from two tree sequences into a single HTML report.
 `scripts/trees_gallery_html.py` renders all trees from two tree sequences into a horizontally scrollable HTML gallery.
 
@@ -51,16 +50,10 @@ Remove specific individuals everywhere:
 python scripts/trim_samples.py example_data/maize.tsz --individuals B73,Mo17
 ```
 
-Remove regions for all samples:
-
-```bash
-python scripts/trim_regions.py example_data/maize.tsz --remove example_data/bad_regions.bed --simplify
-```
-
 Collapse low-accessibility windows across a directory of trees (shared window filter, one summary log):
 
 ```bash
-python scripts/collapse_low_access_windows.py \
+python scripts/trim_regions.py \
   --ts-dir /path/to/trees \
   --window-size 50000 \
   --cutoff-bp 2500 \
@@ -103,7 +96,7 @@ python scripts/trees_gallery_html.py natefun.tsz vanilla.tsz --out trees_gallery
   Individuals are removed only within the listed regions.
 - Shared helpers now live in `scripts/argtest_common.py` (tree I/O, mutational-load helpers, trim helpers, and collapse helpers).
 - Internal imports should use `argtest_common` (the previous `mutload_common.py` module has been removed).
-- `scripts/collapse_low_access_windows.py` infers mutation-map files from TS filenames, computes one shared window mask, applies it to all files, and writes a single summary log.
+- `scripts/trim_regions.py` now infers mutation-map files from TS filenames, computes one shared window mask, applies it to all files, and writes a single summary log.
 - Generated `logs/` and `results/` outputs are ignored by git.
 
 ## Options
@@ -137,13 +130,13 @@ options:
 `trim_regions.py`:
 
 ```text
-positional arguments:
-  ts                    Tree sequence file (.ts, .trees, or .tsz)
-
 options:
-  --remove              BED file(s) of regions to remove (comma-separated or repeated)
-  --simplify            Simplify output while preserving original coordinates
-  --out                 Output tree sequence path (.ts, .trees, or .tsz)
+  --ts-dir              Directory containing tree sequence files (.tsz, .ts, .trees)
+  --window-size         Window size in bp for accessibility checks
+  --cutoff-bp           Minimum accessible bp per window to keep
+  --out-dir             Output directory (default: <ts-dir>/collapsed)
+  --pattern             Glob pattern to filter inputs (default: *)
+  --log                 Log path (default: <out-dir>/collapse_log.txt)
 ```
 
 `compare_trees_html.py`:
@@ -157,18 +150,6 @@ positional arguments:
 
 options:
   --out                 Output HTML file (default: tree_compare.html)
-```
-
-`collapse_low_access_windows.py`:
-
-```text
-options:
-  --ts-dir              Directory containing tree sequence files (.tsz, .ts, .trees)
-  --window-size         Window size in bp for accessibility checks
-  --cutoff-bp           Minimum accessible bp per window to keep
-  --out-dir             Output directory (default: <ts-dir>/collapsed)
-  --pattern             Glob pattern to filter inputs (default: *)
-  --log                 Log path (default: <out-dir>/collapse_log.txt)
 ```
 
 `trees_gallery_html.py`:
