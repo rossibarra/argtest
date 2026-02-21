@@ -13,6 +13,16 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     tszip = None
 
+try:
+    import msprime
+except Exception:  # pragma: no cover - optional dependency
+    msprime = None
+
+
+def _require_msprime():
+    if msprime is None:
+        raise RuntimeError("msprime is required for accessibility mask and collapse helpers")
+
 
 def load_ts(path: Path) -> tskit.TreeSequence:
     # Handle compressed tree sequences if requested.
@@ -324,3 +334,159 @@ def load_remove_intervals(paths):
         ends = [e for _, e in spans]
         intervals[name] = {"starts": starts, "ends": ends}
     return intervals
+
+
+def merge_intervals(intervals):
+    # Merge overlapping or adjacent half-open intervals [left, right).
+    if len(intervals) == 0:
+        return []
+    intervals = np.asarray(intervals, dtype=float)
+    intervals = intervals[np.argsort(intervals[:, 0])]
+    merged = [intervals[0].tolist()]
+    for left, right in intervals[1:]:
+        if left <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], right)
+        else:
+            merged.append([left, right])
+    return merged
+
+
+def accessible_intervals_from_mu(mu):
+    # Convert mutation-rate map into explicit accessible intervals.
+    pos = np.asarray(mu.position, dtype=float)
+    rate = np.asarray(mu.rate)
+    keep = rate > 0
+    lefts = pos[:-1][keep]
+    rights = pos[1:][keep]
+    return np.column_stack([lefts, rights])
+
+
+def overlap_lengths(intervals, windows):
+    # Return total overlap length per window for sorted half-open intervals.
+    intervals = np.asarray(intervals, dtype=float)
+    windows = np.asarray(windows, dtype=float)
+    k = len(windows) - 1
+    out = np.zeros(k, dtype=float)
+    i = 0
+    m = len(intervals)
+    for w in range(k):
+        wl, wr = windows[w], windows[w + 1]
+        while i < m and intervals[i, 1] <= wl:
+            i += 1
+        j = i
+        while j < m and intervals[j, 0] < wr:
+            ol = max(wl, intervals[j, 0])
+            or_ = min(wr, intervals[j, 1])
+            if or_ > ol:
+                out[w] += or_ - ol
+            if intervals[j, 1] >= wr:
+                break
+            j += 1
+    return out
+
+
+def ratemap_from_keep_intervals(keep_intervals, sequence_length):
+    # Build a binary RateMap over [0, sequence_length] with 1 in keep intervals.
+    _require_msprime()
+    keep = sorted(
+        [
+            [max(0.0, float(left)), min(float(sequence_length), float(right))]
+            for left, right in keep_intervals
+            if right > left
+        ],
+        key=lambda x: x[0],
+    )
+    breaks = [0.0]
+    for left, right in keep:
+        breaks.extend([left, right])
+    breaks.append(float(sequence_length))
+    pos = np.unique(np.asarray(breaks, dtype=float))
+    pos.sort()
+    rate = np.zeros(len(pos) - 1, dtype=float)
+    k = 0
+    for i in range(len(rate)):
+        seg_l, seg_r = pos[i], pos[i + 1]
+        while k < len(keep) and keep[k][1] <= seg_l:
+            k += 1
+        if k < len(keep) and keep[k][0] < seg_r and keep[k][1] > seg_l:
+            rate[i] = 1.0
+    return msprime.RateMap(position=pos, rate=rate)
+
+
+def and_ratemaps_binary(a: msprime.RateMap, b: msprime.RateMap):
+    # Return binary RateMap that is 1 where both inputs are 1.
+    _require_msprime()
+    assert a.sequence_length == b.sequence_length
+    pos = np.unique(np.concatenate([np.asarray(a.position), np.asarray(b.position)]))
+    pos.sort()
+    rate = (a.get_rate(pos[:-1]).astype(bool) & b.get_rate(pos[:-1]).astype(bool)).astype(float)
+    return msprime.RateMap(position=pos, rate=rate)
+
+
+def collapse_masked_intervals(ts: tskit.TreeSequence, accessible: msprime.RateMap):
+    # Collapse masked intervals and compact coordinates to unmasked sequence length.
+    assert np.all(np.logical_or(accessible.rate == 0.0, accessible.rate == 1.0))
+    assert accessible.sequence_length == ts.sequence_length
+    tables = ts.dump_tables()
+    tables.sequence_length = accessible.get_cumulative_mass(ts.sequence_length)
+    tables.edges.left = accessible.get_cumulative_mass(tables.edges.left)
+    tables.edges.right = accessible.get_cumulative_mass(tables.edges.right)
+    tables.edges.keep_rows(tables.edges.right > tables.edges.left)
+    is_connected = np.full(tables.nodes.num_rows, False)
+    is_connected[tables.edges.parent] = True
+    is_connected[tables.edges.child] = True
+    node_map = tables.nodes.keep_rows(is_connected)
+    tables.edges.parent = node_map[tables.edges.parent]
+    tables.edges.child = node_map[tables.edges.child]
+    site_map = tables.sites.keep_rows(accessible.get_rate(tables.sites.position).astype(bool))
+    tables.sites.position = accessible.get_cumulative_mass(tables.sites.position)
+    tables.mutations.node = node_map[tables.mutations.node]
+    tables.mutations.site = site_map[tables.mutations.site]
+    tables.mutations.keep_rows(
+        np.logical_and(
+            tables.mutations.site != tskit.NULL,
+            tables.mutations.node != tskit.NULL,
+        )
+    )
+    tables.sort()
+    tables.build_index()
+    tables.compute_mutation_parents()
+    return tables.tree_sequence()
+
+
+def collapse_masked_and_low_access_windows(ts, mu, window_size, cutoff_bp):
+    # Build combined accessibility mask and collapse TS in one step.
+    mask, good_intervals, windows, acc_bp = build_shared_mask(
+        ts=ts,
+        mu=mu,
+        window_size=window_size,
+        cutoff_bp=cutoff_bp,
+    )
+    ts2 = collapse_masked_intervals(ts, mask)
+    return ts2, mask, good_intervals, windows, acc_bp
+
+
+def build_shared_mask(ts, mu, window_size, cutoff_bp):
+    # Compute the binary mask from mutation-map accessibility and window accessibility.
+    _require_msprime()
+    sequence_length = float(ts.sequence_length)
+    acc_mu = msprime.RateMap(
+        position=np.asarray(mu.position, dtype=float),
+        rate=(np.asarray(mu.rate) > 0).astype(float),
+    )
+    assert acc_mu.sequence_length == sequence_length
+    acc_intervals = accessible_intervals_from_mu(mu)
+    windows = np.arange(0, sequence_length + window_size, window_size, dtype=float)
+    if windows[-1] > sequence_length:
+        windows[-1] = sequence_length
+    acc_bp = overlap_lengths(acc_intervals, windows)
+    assert len(acc_bp) == len(windows) - 1
+    assert np.all(acc_bp >= 0)
+    assert np.all(acc_bp[:-1] <= window_size + 1e-6)
+    good = [[windows[i], windows[i + 1]] for i in range(len(windows) - 1) if acc_bp[i] >= cutoff_bp]
+    good_intervals = merge_intervals(good)
+    if len(good_intervals) == 0:
+        raise ValueError("No windows pass the accessibility cutoff; nothing to keep.")
+    acc_win = ratemap_from_keep_intervals(good_intervals, sequence_length)
+    mask = and_ratemaps_binary(acc_mu, acc_win)
+    return mask, good_intervals, windows, acc_bp

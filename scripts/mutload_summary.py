@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from mutload_common import (
+from argtest_common import (
     aggregate_by_individual,
     load_ts,
     mutational_load,
